@@ -1,0 +1,271 @@
+import re
+
+def evaluate_expression_with_steps(expression, variables):
+    try:
+        for var_name, var_value in variables.items():
+            expression = expression.replace(var_name, repr(var_value))
+        result = eval(expression)  
+        return result, [f"{expression} = {result}"]
+    except ZeroDivisionError:
+        return None, ["Division by zero is not allowed."]
+    except SyntaxError:
+        return None, ["Invalid syntax."]
+    except Exception as e:
+        return None, [f"Error: {str(e)}"]
+
+def lexer(input_text):
+    tokens = []
+    token_specification = [
+        ('NUMBER', r'\d+(\.\d*)?'),  
+        ('STRING', r"'[^']*'"), 
+        ('ASSIGN', r'='), 
+        ('ID', r'[A-Za-z_]\w*'),
+        ('OP', r'[+\-*/]'),  
+        ('LPAREN', r'\('), 
+        ('RPAREN', r'\)'), 
+        ('SKIP', r'[ \t]+'), 
+        ('MISMATCH', r'.'),
+    ]
+    tok_regex = '|'.join(f'(?P<{pair[0]}>{pair[1]})' for pair in token_specification)
+    for mo in re.finditer(tok_regex, input_text):
+        kind = mo.lastgroup
+        value = mo.group()
+        if kind == 'NUMBER':
+            value = float(value) if '.' in value else int(value)
+        elif kind == 'STRING':
+            value = value.strip("'") 
+        elif kind == 'SKIP':
+            continue
+        elif kind == 'MISMATCH':
+            raise RuntimeError(f"Unexpected character: {value}")
+        tokens.append((kind, value))
+    return tokens
+
+def parse(tokens):
+    def parse_assignment():
+        if tokens and tokens[0][0] == 'ID' and tokens[1][0] == 'ASSIGN':
+            var_name = tokens[0][1]
+            tokens.pop(0) 
+            tokens.pop(0) 
+            expr = parse_expr()
+            return ('assign', var_name, expr)
+
+    def parse_expr():
+        left = parse_term()
+        while tokens and tokens[0][0] == 'OP' and tokens[0][1] in ['+', '-']:
+            operator = tokens.pop(0)[1]
+            right = parse_term()
+            left = ('op', operator, left, right)
+        return left
+
+    def parse_term():
+        left = parse_factor()
+        while tokens and tokens[0][0] == 'OP' and tokens[0][1] in ['*', '/']:
+            operator = tokens.pop(0)[1]
+            right = parse_factor()
+            left = ('op', operator, left, right)
+        return left
+
+    def parse_factor():
+        if not tokens:
+            raise SyntaxError("Unexpected end of input")
+        token = tokens.pop(0)
+        if token[0] == 'NUMBER':
+            return ('number', token[1])
+        elif token[0] == 'STRING':
+            return ('string', token[1])  
+        elif token[0] == 'ID':
+            return ('id', token[1])
+        elif token[0] == 'LPAREN':
+            expr = parse_expr()
+            if not tokens or tokens[0][0] != 'RPAREN':
+                raise SyntaxError("Expected ')' ")
+            tokens.pop(0) 
+            return ('paren', expr)
+        else:
+            raise SyntaxError(f"Unexpected token: {token}")
+
+    result = parse_assignment() or parse_expr()
+    if tokens:
+        raise SyntaxError("Extra tokens after parsing")
+    return result
+
+def generate_grammar_from_expression(tokens):
+    grammar = {
+        'E': [['T', "E'"]], 
+        "E'": [['+', 'T', "E'"], ['-', 'T', "E'"], ['ε']],
+        'T': [['F', "T'"]],  
+        "T'": [['*', 'F', "T'"], ['/', 'F', "T'"], ['ε']], 
+        'F': [['NUMBER'], ['STRING'], ['ID'], ['(', 'E', ')']]
+    }
+    return grammar
+
+def first(symbol, grammar, firsts):
+    if symbol in firsts:
+        return firsts[symbol]
+    
+    result = set()
+    if symbol in ['NUMBER', 'STRING', 'ID', '(', '+', '-', '*', '/', ')']: 
+        result.add(symbol)
+    elif symbol in grammar:
+        for production in grammar[symbol]:
+            for prod_symbol in production:
+                if prod_symbol == 'ε':
+                    result.add('ε')
+                    break
+                first_set = first(prod_symbol, grammar, firsts)
+                result.update(first_set)
+                if 'ε' not in first_set:
+                    break
+    firsts[symbol] = result
+    return result
+
+def follow(symbol, grammar, firsts, follows):
+    if symbol in follows:
+        return follows[symbol]
+    
+    result = set()
+    if symbol == 'E':
+        result.add('$')
+    for lhs, productions in grammar.items():
+        for production in productions:
+            if symbol in production:
+                index = production.index(symbol)
+                for next_symbol in production[index + 1:]:
+                    first_set = first(next_symbol, grammar, firsts)
+                    result.update(first_set - {'ε'})
+                    if 'ε' not in first_set:
+                        break
+                else:
+                    if lhs != symbol:
+                        result.update(follow(lhs, grammar, firsts, follows))
+
+    follows[symbol] = result
+    return result
+
+def first_and_follow(grammar):
+    firsts = {}
+    follows = {}
+    for non_terminal in grammar:
+        first(non_terminal, grammar, firsts)
+    for non_terminal in grammar:
+        follow(non_terminal, grammar, firsts, follows)
+    return firsts, follows
+
+def generate_parsing_table(grammar, first_sets, follow_sets):
+    parsing_table = {}
+    
+    for non_terminal, productions in grammar.items():
+        parsing_table[non_terminal] = {}
+        for production in productions:
+            first_set = first_sets[production[0]] if production[0] in first_sets else {production[0]}
+            for terminal in first_set:
+                if terminal != 'ε':
+                    if terminal not in parsing_table[non_terminal]:
+                        parsing_table[non_terminal][terminal] = production
+                    else:
+                        raise ValueError(f"Conflict found in parsing table for {non_terminal} with terminal {terminal}")
+            
+            if 'ε' in first_set:
+                for terminal in follow_sets[non_terminal]:
+                    if terminal != '$':
+                        if terminal not in parsing_table[non_terminal]:
+                            parsing_table[non_terminal][terminal] = ['ε']
+                        else:
+                            raise ValueError(f"Conflict found in parsing table for {non_terminal} with terminal {terminal}")
+    
+    return parsing_table
+
+def print_parsing_table(parsing_table):
+    non_terminals = list(parsing_table.keys())
+    terminals = ['ID', 'ASSIGN', 'OP', 'STRING', '(', ')', '$']
+
+    print(f"{'':<12}", end="")
+    for terminal in terminals:
+        print(f"{terminal:<12}", end="")
+    print()
+
+    for non_terminal in non_terminals:
+        print(f"{non_terminal:<12}", end="")
+        for terminal in terminals:
+            if terminal in parsing_table[non_terminal]:
+                production = parsing_table[non_terminal][terminal]
+                print(f"{str(production):<12}", end="")
+            else:
+                print(f"{'':<12}", end="")
+        print()
+
+def symbol_table(variables):
+    return {var_name: var_value for var_name, var_value in variables.items()}
+
+def run(input_type, text, variables):
+    try:
+        if '=' in text:
+            var_name, value_expr = text.split('=', 1)
+            var_name, value_expr = var_name.strip(), value_expr.strip()
+            if not re.match(r'^[a-zA-Z_]\w*$', var_name):
+                raise ValueError(f"Invalid variable name: {var_name}")
+            result, steps = evaluate_expression_with_steps(value_expr, variables)
+            if result is not None:
+                variables[var_name] = result
+                return result, steps
+            else:
+                return None, ["Evaluation returned None."]
+        else:
+            current_expr = text.strip()
+            result, steps = evaluate_expression_with_steps(current_expr, variables)
+            if result is not None:
+                return result, steps
+            else:
+                return None, ["Evaluation returned None."]
+    except Exception as e:
+        return None, [str(e)]
+
+def interactive_shell():
+    print("Welcome to Basic Interactive Shell. Type 'exit' to quit.")
+    variables = {}
+
+    while True:
+        try:
+            text = input('basic > ')
+            if text.lower() == 'exit':
+                print("Exiting the interactive shell.")
+                break
+
+            result, steps = run('<stdin>', text, variables)
+            if steps:
+                print("Steps:\n" + "\n".join(steps))
+            if result is not None:
+                print(f"Result: {result}")
+            else:
+                print("No result returned.")
+                
+            tokens = lexer(text)
+            print("Tokens:", tokens)
+
+            grammar = generate_grammar_from_expression(tokens)
+            first_sets, follow_sets = first_and_follow(grammar)
+            print("First Sets:")
+            for key, value in first_sets.items():
+                print(f"  {key}: {value}")
+            print("Follow Sets:")
+            for key, value in follow_sets.items():
+                print(f"  {key}: {value}")
+
+            parsing_table = generate_parsing_table(grammar, first_sets, follow_sets)
+            print("Parsing Table:")
+            print_parsing_table(parsing_table)
+
+            try:
+                parse_tree = parse(tokens)
+                print("Parse Tree:", parse_tree)
+            except Exception as e:
+                print(f"Parse Error: {str(e)}")
+
+            symbol_table_data = symbol_table(variables)
+            print("Symbol Table:", symbol_table_data)
+
+        except Exception as e:
+            print(f"Unhandled Error: {str(e)}")
+
+interactive_shell()
